@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Despacho de Flota</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #F2F4F6; font-family: 'Barlow', system-ui, sans-serif; color: #17222E; }
+  input, select, textarea { width: 100%; padding: 10px 12px; border: 1.5px solid #D5DBE2; border-radius: 8px;
+    font-family: 'Barlow', sans-serif; font-size: 15px; background: #fff; color: #17222E; outline: none; }
+  input:focus, select:focus, textarea:focus { border-color: #17222E; }
+  input.err, select.err { border-color: #B42318; }
+  label { display: block; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #5A6673; margin-bottom: 5px; }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+  .disp { font-family: 'Barlow Condensed', sans-serif; }
+  button { cursor: pointer; font-family: 'Barlow', sans-serif; }
+  .tab { padding: 9px 14px; border: none; background: transparent; font-size: 15px; font-weight: 600; color: #9AA6B2; border-bottom: 3px solid transparent; }
+  .tab.on { color: #fff; border-color: #FFB020; }
+  .card { background: #fff; border-radius: 12px; border: 1.5px solid #D5DBE2; }
+  @media print { header nav, .no-print { display: none !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+/* ============================================================
+   CONFIGURACIÓN — pega aquí tus credenciales de Supabase
+   (Supabase > Project Settings > API)
+   ============================================================ */
+const SUPABASE_URL = "PEGA_AQUI_TU_PROJECT_URL";        // ej. https://abcd1234.supabase.co
+const SUPABASE_ANON_KEY = "PEGA_AQUI_TU_ANON_PUBLIC_KEY"; // la clave larga "anon public"
+
+const TRANSPORTISTA = {
+  placa: "C179852",
+  codigo: "H461",
+  cedulaJuridica: "3101366337-12",
+  marchamoUnidad: "CR001151802",
+};
+
+/* ============================================================ */
+const { useState, useEffect, useCallback } = React;
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const MESES = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+const MESES_LARGO = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const DIAS_CORTO = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+const ORDEN_DIAS = [1,2,3,4,5,6,0];
+
+function calcSemana(fechaStr) {
+  const d = new Date(fechaStr + "T12:00");
+  const ene1 = new Date(d.getFullYear(), 0, 1, 12);
+  const diaSem = (ene1.getDay() + 6) % 7;
+  const lunesBase = new Date(ene1);
+  lunesBase.setDate(ene1.getDate() - diaSem);
+  return Math.floor((d - lunesBase) / (7 * 24 * 3600 * 1000)) + 1;
+}
+function fmtFecha(fechaStr, hora) {
+  if (!fechaStr) return "Sin fecha";
+  const d = new Date(fechaStr + "T12:00");
+  const dias = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
+  let s = `${dias[d.getDay()]} ${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()}`;
+  if (hora) s += ` · ${hora}`;
+  return s;
+}
+function hoyISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function fmtDur(ms) {
+  if (!ms || ms <= 0) return "";
+  const min = Math.round(ms / 60000);
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+function fmtHoraTs(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+function choferDisponible(c, fecha, hora) {
+  if (!c.activo) return false;
+  if (fecha) {
+    const dia = new Date(fecha + "T12:00").getDay();
+    if (!(c.dias || []).includes(dia)) return false;
+  }
+  if (hora && (hora < c.desde || hora > c.hasta)) return false;
+  return true;
+}
+function descDisp(c) {
+  if (!c.activo) return "Deshabilitado";
+  const dias = (c.dias || []).length === 7 ? "Todos los días" : ORDEN_DIAS.filter(x => c.dias.includes(x)).map(x => DIAS_CORTO[x]).join(", ");
+  const horario = c.desde === "00:00" && c.hasta === "23:59" ? "todo el día" : `${c.desde}–${c.hasta}`;
+  return `${dias} · ${horario}`;
+}
+
+const formVacio = { fecha: "", hora: "", chofer: "", tipo: "Recolecta", suplidor: "", marchamo: "", observaciones: "" };
+
+function App() {
+  const [registros, setRegistros] = useState([]);
+  const [choferes, setChoferes] = useState([]);
+  const [suplidores, setSuplidores] = useState([]);
+  const [marchamos, setMarchamos] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [vista, setVista] = useState("registros");
+  const [mostrarForm, setMostrarForm] = useState(false);
+  const [form, setForm] = useState(formVacio);
+  const [errores, setErrores] = useState({});
+  const [filtroMes, setFiltroMes] = useState("todos");
+  const [filtroChofer, setFiltroChofer] = useState("todos");
+  const [nuevoChofer, setNuevoChofer] = useState({ nombre: "", cedula: "" });
+  const [nuevoSuplidor, setNuevoSuplidor] = useState({ nombre: "", direccion: "", contacto: "" });
+  const [nuevoMarchamo, setNuevoMarchamo] = useState("");
+  const [msgMarchamo, setMsgMarchamo] = useState("");
+  const [repMes, setRepMes] = useState("todos");
+
+  const sinConfigurar = SUPABASE_URL.startsWith("PEGA_AQUI");
+
+  const cargarTodo = useCallback(async () => {
+    try {
+      const [r1, r2, r3, r4] = await Promise.all([
+        sb.from("registros").select("*").order("fecha", { ascending: false }),
+        sb.from("choferes").select("*").order("created_at"),
+        sb.from("suplidores").select("*").order("created_at"),
+        sb.from("marchamos").select("*").order("created_at"),
+      ]);
+      const err = r1.error || r2.error || r3.error || r4.error;
+      if (err) throw err;
+      setRegistros(r1.data || []);
+      setChoferes(r2.data || []);
+      setSuplidores(r3.data || []);
+      setMarchamos((r4.data || []).map(m => m.numero));
+      setErrorMsg("");
+    } catch (e) {
+      setErrorMsg("No se pudo conectar con la base de datos: " + (e.message || e));
+    } finally {
+      setCargando(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (sinConfigurar) { setCargando(false); return; }
+    cargarTodo();
+    // Tiempo real: cuando alguien más cambia un registro, se actualiza solo
+    const canal = sb.channel("registros-cambios")
+      .on("postgres_changes", { event: "*", schema: "public", table: "registros" }, () => cargarTodo())
+      .subscribe();
+    return () => { sb.removeChannel(canal); };
+  }, [cargarTodo]);
+
+  async function ejecutar(promesa) {
+    const { error } = await promesa;
+    if (error) { setErrorMsg("Error al guardar: " + error.message); return false; }
+    setErrorMsg("");
+    await cargarTodo();
+    return true;
+  }
+
+  // ── Marchamos ──
+  const usados = new Set(registros.map(r => String(r.marchamo)).filter(Boolean));
+  const siguienteMarchamo = marchamos.find(m => !usados.has(m)) || "";
+
+  // ── Registros ──
+  function abrirForm() {
+    setForm({ ...formVacio, marchamo: siguienteMarchamo, chofer: "" });
+    setMostrarForm(true);
+  }
+  function validar() {
+    const e = {};
+    if (!form.fecha) e.fecha = "Selecciona la fecha";
+    if (!form.chofer) e.chofer = "Selecciona el chofer";
+    else {
+      const c = choferes.find(x => x.nombre === form.chofer);
+      if (c && !choferDisponible(c, form.fecha, form.hora)) e.chofer = "Este chofer no está habilitado para esa fecha y hora (revisa Ajustes)";
+    }
+    if (!form.suplidor) e.suplidor = "Selecciona el suplidor";
+    if (form.marchamo && usados.has(String(form.marchamo).trim())) e.marchamo = "Ese marchamo ya fue usado";
+    setErrores(e);
+    return Object.keys(e).length === 0;
+  }
+  async function crear() {
+    if (!validar()) return;
+    const ok = await ejecutar(sb.from("registros").insert({
+      fecha: form.fecha, hora: form.hora, chofer: form.chofer, tipo: form.tipo,
+      suplidor: form.suplidor, marchamo: String(form.marchamo).trim(),
+      observaciones: form.observaciones, estado: "programada",
+    }));
+    if (ok) { setForm(formVacio); setErrores({}); setMostrarForm(false); }
+  }
+  const cambiarEstado = (id, estado) => ejecutar(sb.from("registros").update({ estado }).eq("id", id));
+  const iniciarViaje = (id) => ejecutar(sb.from("registros").update({ estado: "enruta", inicio_ts: new Date().toISOString() }).eq("id", id));
+  async function terminarViaje(r) {
+    const fin = Date.now();
+    const dur = r.inicio_ts ? fin - Date.parse(r.inicio_ts) : r.duracion_ms || null;
+    await ejecutar(sb.from("registros").update({ estado: "completada", fin_ts: new Date(fin).toISOString(), duracion_ms: dur }).eq("id", r.id));
+  }
+  const eliminar = (id) => ejecutar(sb.from("registros").delete().eq("id", id));
+
+  // ── Catálogos ──
+  async function agregarChofer() {
+    if (!nuevoChofer.nombre.trim()) return;
+    const ok = await ejecutar(sb.from("choferes").insert({ nombre: nuevoChofer.nombre.trim(), cedula: nuevoChofer.cedula.trim() }));
+    if (ok) setNuevoChofer({ nombre: "", cedula: "" });
+  }
+  async function agregarSuplidor() {
+    if (!nuevoSuplidor.nombre.trim()) return;
+    const ok = await ejecutar(sb.from("suplidores").insert({
+      nombre: nuevoSuplidor.nombre.trim(), direccion: nuevoSuplidor.direccion.trim(), contacto: nuevoSuplidor.contacto.trim(),
+    }));
+    if (ok) setNuevoSuplidor({ nombre: "", direccion: "", contacto: "" });
+  }
+  const actualizarDisp = (c, cambios) => ejecutar(sb.from("choferes").update(cambios).eq("id", c.id));
+  function toggleDia(c, dia) {
+    const dias = c.dias.includes(dia) ? c.dias.filter(d => d !== dia) : [...c.dias, dia];
+    actualizarDisp(c, { dias });
+  }
+
+  // ── Marchamos: agregar/quitar ──
+  async function agregarMarchamos() {
+    const texto = nuevoMarchamo.trim();
+    if (!texto) return;
+    let nuevos = [];
+    const rango = texto.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (rango) {
+      const ini = Number(rango[1]), fin = Number(rango[2]);
+      if (fin < ini || fin - ini > 500) { setMsgMarchamo("Rango inválido (máximo 500 por vez)."); return; }
+      const ancho = rango[1].length;
+      for (let n = ini; n <= fin; n++) nuevos.push(String(n).padStart(ancho, "0"));
+    } else {
+      nuevos = texto.split(/[\s,;]+/).map(m => m.trim()).filter(Boolean);
+    }
+    const existentes = new Set(marchamos);
+    const agregados = nuevos.filter(m => !existentes.has(m));
+    if (agregados.length === 0) { setMsgMarchamo("Esos marchamos ya están en el consecutivo."); return; }
+    const ok = await ejecutar(sb.from("marchamos").insert(agregados.map(numero => ({ numero }))));
+    if (ok) {
+      setNuevoMarchamo("");
+      const dup = nuevos.length - agregados.length;
+      setMsgMarchamo(`Se agregaron ${agregados.length} marchamo${agregados.length > 1 ? "s" : ""}` + (dup > 0 ? ` (${dup} ya existían)` : "") + ".");
+    }
+  }
+  function quitarMarchamo(m) {
+    if (usados.has(m)) return;
+    ejecutar(sb.from("marchamos").delete().eq("numero", m));
+  }
+
+  // ── Exportar CSV ──
+  function exportarCSV() {
+    const enc = ["Mes","Semana","Fecha","Hora","Chofer","Envío/Recolecta","Suplidor","# Marchamo","Estado","Inicio real","Fin real","Duración","Observaciones"];
+    const filas = [...registros].sort((a,b) => a.fecha.localeCompare(b.fecha)).map(r => {
+      const d = new Date(r.fecha + "T12:00");
+      return [d.getMonth()+1, calcSemana(r.fecha), r.fecha, r.hora || "", r.chofer, r.tipo, r.suplidor, r.marchamo || "", r.estado,
+        r.inicio_ts ? fmtHoraTs(r.inicio_ts) : "", r.fin_ts ? fmtHoraTs(r.fin_ts) : "", r.duracion_ms ? fmtDur(r.duracion_ms) : "",
+        (r.observaciones || "").replace(/[\n;]/g, " ")];
+    });
+    const csv = [enc, ...filas].map(f => f.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "transporte_camion.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ── Derivados ──
+  const mesesConDatos = [...new Set(registros.map(r => r.fecha && r.fecha.slice(0,7)).filter(Boolean))].sort();
+  const visibles = registros
+    .filter(r => filtroMes === "todos" || (r.fecha || "").startsWith(filtroMes))
+    .filter(r => filtroChofer === "todos" || r.chofer === filtroChofer)
+    .sort((a,b) => (b.fecha || "").localeCompare(a.fecha || ""));
+  const programadas = registros.filter(r => r.estado === "programada").length;
+  const hoy = hoyISO();
+  const viajesHoy = registros
+    .filter(r => r.fecha === hoy && (r.estado === "programada" || r.estado === "enruta"))
+    .sort((a,b) => (a.hora || "99:99").localeCompare(b.hora || "99:99"));
+  const set = (campo) => (ev) => setForm({ ...form, [campo]: ev.target.value });
+
+  const EST = {
+    programada: { label: "Programada", color: "#1F6FEB", bg: "#E4EEFC" },
+    enruta: { label: "En ruta", color: "#B7791F", bg: "#FCF3DC" },
+    completada: { label: "Completada", color: "#1F7A4D", bg: "#E2F3EA" },
+    cancelada: { label: "Cancelada", color: "#B42318", bg: "#FBE9E7" },
+  };
+
+  if (sinConfigurar) {
+    return (
+      <div style={{ maxWidth: 560, margin: "60px auto", padding: 20 }}>
+        <div className="card" style={{ padding: 24 }}>
+          <div className="disp" style={{ fontSize: 24, fontWeight: 700, textTransform: "uppercase" }}>Falta configurar Supabase</div>
+          <p style={{ fontSize: 15, color: "#5A6673", lineHeight: 1.6 }}>
+            Abre el archivo <span className="mono">index.html</span> y en la sección <b>CONFIGURACIÓN</b> (al inicio del script)
+            reemplaza <span className="mono">PEGA_AQUI_TU_PROJECT_URL</span> y <span className="mono">PEGA_AQUI_TU_ANON_PUBLIC_KEY</span> con
+            los valores de tu proyecto (Supabase → Project Settings → API). Luego vuelve a subir el archivo.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      <header style={{ background: "#17222E", padding: "18px 16px 0" }}>
+        <div style={{ maxWidth: 820, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div className="disp" style={{ fontSize: 27, fontWeight: 700, color: "#fff", lineHeight: 1, textTransform: "uppercase" }}>Transporte Camión</div>
+              <div className="mono" style={{ fontSize: 12, color: "#9AA6B2", marginTop: 5 }}>
+                Placa {TRANSPORTISTA.placa} · Cód. {TRANSPORTISTA.codigo} · Marchamo unidad {TRANSPORTISTA.marchamoUnidad}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 16, textAlign: "center" }}>
+              <div>
+                <div className="disp" style={{ fontSize: 25, fontWeight: 700, color: "#FFB020", lineHeight: 1 }}>{programadas}</div>
+                <div style={{ fontSize: 11, color: "#9AA6B2", textTransform: "uppercase" }}>Programadas</div>
+              </div>
+              <div>
+                <div className="disp" style={{ fontSize: 25, fontWeight: 700, color: "#fff", lineHeight: 1 }}>{registros.length}</div>
+                <div style={{ fontSize: 11, color: "#9AA6B2", textTransform: "uppercase" }}>Registros</div>
+              </div>
+            </div>
+          </div>
+          <nav style={{ display: "flex", gap: 2, marginTop: 12, overflowX: "auto" }}>
+            {[["registros","Registros"],["marchamos","Marchamos"],["reporte","Reporte"],["catalogos","Catálogos"],["ajustes","Ajustes"]].map(([v, t]) => (
+              <button key={v} className={"tab" + (vista === v ? " on" : "")} onClick={() => setVista(v)}>{t}</button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 820, margin: "0 auto", padding: "18px 16px 60px" }}>
+        {errorMsg && (
+          <div style={{ background: "#FBE9E7", color: "#B42318", padding: "10px 14px", borderRadius: 8, fontSize: 14, marginBottom: 16 }}>{errorMsg}</div>
+        )}
+
+        {cargando ? (
+          <div style={{ textAlign: "center", padding: 40, color: "#8A93A0" }}>Cargando…</div>
+        ) : vista === "registros" ? (
+          <React.Fragment>
+            {viajesHoy.length > 0 && (
+              <section style={{ background: "#FFF7E6", border: "2px solid #FFB020", borderRadius: 12, padding: "14px 14px 8px", marginBottom: 16 }}>
+                <div className="disp" style={{ fontSize: 19, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>🚚 Viajes de hoy — {viajesHoy.length}</div>
+                <div style={{ fontSize: 13, color: "#8A6A1F", marginBottom: 10 }}>{fmtFecha(hoy)} · ordenados por hora</div>
+                {viajesHoy.map(r => (
+                  <div key={r.id} style={{ background: "#fff", borderRadius: 10, border: "1px solid #F0DFAF", padding: "10px 12px", marginBottom: 8, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <span className="mono" style={{ fontSize: 15, fontWeight: 600, minWidth: 52, color: r.hora ? "#17222E" : "#9AA6B2" }}>{r.hora || "s/hora"}</span>
+                    <div style={{ flex: 1, minWidth: 150 }}>
+                      <div style={{ fontWeight: 600, fontSize: 15 }}>{r.tipo} · {r.suplidor}</div>
+                      <div style={{ fontSize: 13, color: "#5A6673" }}>
+                        {r.chofer}{r.marchamo ? <React.Fragment> · <span className="mono">{r.marchamo}</span></React.Fragment> : ""}
+                        {r.estado === "enruta" && r.inicio_ts ? ` · iniciado ${fmtHoraTs(r.inicio_ts)}` : ""}
+                      </div>
+                    </div>
+                    {r.estado === "programada"
+                      ? <button onClick={() => iniciarViaje(r.id)} style={{ padding: "9px 16px", background: "#17222E", color: "#FFB020", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700 }}>▶ Iniciar</button>
+                      : <button onClick={() => terminarViaje(r)} style={{ padding: "9px 16px", background: "#1F7A4D", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700 }}>✔ Terminar</button>}
+                  </div>
+                ))}
+              </section>
+            )}
+
+            {!mostrarForm && (
+              <div style={{ display: "flex", gap: 10, marginBottom: 16 }} className="no-print">
+                <button onClick={abrirForm} className="disp" style={{ flex: 1, padding: "13px", background: "#FFB020", border: "none", borderRadius: 10, fontSize: 18, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", color: "#17222E" }}>+ Nuevo registro</button>
+                <button onClick={exportarCSV} style={{ padding: "13px 16px", background: "#fff", border: "1.5px solid #D5DBE2", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Exportar CSV</button>
+              </div>
+            )}
+
+            {mostrarForm && (
+              <section className="card" style={{ padding: 18, marginBottom: 18 }}>
+                <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 14 }}>Nuevo registro</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                  <div>
+                    <label>Fecha</label>
+                    <input type="date" className={errores.fecha ? "err" : ""} value={form.fecha} onChange={set("fecha")} />
+                    {errores.fecha && <div style={{ color: "#B42318", fontSize: 13, marginTop: 3 }}>{errores.fecha}</div>}
+                    {form.fecha && <div style={{ fontSize: 12, color: "#8A93A0", marginTop: 4 }}>Mes {new Date(form.fecha + "T12:00").getMonth()+1} · Semana {calcSemana(form.fecha)} (auto)</div>}
+                  </div>
+                  <div><label>Hora</label><input type="time" value={form.hora} onChange={set("hora")} /></div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                  <div>
+                    <label>Chofer</label>
+                    <select className={errores.chofer ? "err" : ""} value={form.chofer} onChange={set("chofer")}>
+                      <option value="">Selecciona…</option>
+                      {choferes.map(c => {
+                        const ok = choferDisponible(c, form.fecha, form.hora);
+                        return <option key={c.id} value={c.nombre} disabled={!ok}>{c.nombre}{ok ? "" : " — no disponible"}</option>;
+                      })}
+                    </select>
+                    {errores.chofer && <div style={{ color: "#B42318", fontSize: 13, marginTop: 3 }}>{errores.chofer}</div>}
+                    {form.fecha && choferes.length > 0 && choferes.every(c => !choferDisponible(c, form.fecha, form.hora)) &&
+                      <div style={{ color: "#B7791F", fontSize: 13, marginTop: 3 }}>Ningún chofer habilitado para esa fecha/hora.</div>}
+                  </div>
+                  <div>
+                    <label>Envío / Recolecta</label>
+                    <select value={form.tipo} onChange={set("tipo")}>
+                      <option value="Recolecta">Recolecta</option>
+                      <option value="Envío">Envío</option>
+                    </select>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                  <div>
+                    <label>Suplidor / Lugar</label>
+                    <select className={errores.suplidor ? "err" : ""} value={form.suplidor} onChange={set("suplidor")}>
+                      <option value="">Selecciona…</option>
+                      {suplidores.map(s => <option key={s.id} value={s.nombre}>{s.nombre}</option>)}
+                    </select>
+                    {errores.suplidor && <div style={{ color: "#B42318", fontSize: 13, marginTop: 3 }}>{errores.suplidor}</div>}
+                  </div>
+                  <div>
+                    <label># Marchamo</label>
+                    <input className={"mono " + (errores.marchamo ? "err" : "")} value={form.marchamo} onChange={set("marchamo")} placeholder="Sugerido automático" />
+                    {errores.marchamo
+                      ? <div style={{ color: "#B42318", fontSize: 13, marginTop: 3 }}>{errores.marchamo}</div>
+                      : <div style={{ fontSize: 12, color: "#8A93A0", marginTop: 4 }}>Siguiente del consecutivo: {siguienteMarchamo || "—"}</div>}
+                  </div>
+                </div>
+                {form.suplidor && (() => {
+                  const s = suplidores.find(x => x.nombre === form.suplidor);
+                  return s && (s.direccion || s.contacto)
+                    ? <div style={{ fontSize: 13, color: "#5A6673", background: "#F7F9FA", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>📍 {s.direccion}{s.contacto ? ` · ${s.contacto}` : ""}</div>
+                    : null;
+                })()}
+                <div style={{ marginBottom: 16 }}>
+                  <label>Observaciones</label>
+                  <textarea rows={2} value={form.observaciones} onChange={set("observaciones")} placeholder="Notas del viaje, orden de compra, etc." />
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={crear} className="disp" style={{ flex: 1, padding: "12px", background: "#17222E", color: "#fff", border: "none", borderRadius: 8, fontSize: 17, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em" }}>Guardar registro</button>
+                  <button onClick={() => { setMostrarForm(false); setErrores({}); }} style={{ padding: "12px 18px", background: "#EDF0F3", color: "#5A6673", border: "none", borderRadius: 8, fontSize: 15, fontWeight: 600 }}>Cancelar</button>
+                </div>
+              </section>
+            )}
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }} className="no-print">
+              <select style={{ width: "auto", flex: 1, minWidth: 130 }} value={filtroMes} onChange={e => setFiltroMes(e.target.value)}>
+                <option value="todos">Todos los meses</option>
+                {mesesConDatos.map(m => { const [a, mm] = m.split("-"); return <option key={m} value={m}>{MESES_LARGO[Number(mm)-1]} {a}</option>; })}
+              </select>
+              <select style={{ width: "auto", flex: 1, minWidth: 130 }} value={filtroChofer} onChange={e => setFiltroChofer(e.target.value)}>
+                <option value="todos">Todos los choferes</option>
+                {choferes.map(c => <option key={c.id} value={c.nombre}>{c.nombre}</option>)}
+              </select>
+            </div>
+
+            {visibles.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "50px 20px", background: "#fff", borderRadius: 12, border: "1.5px dashed #D5DBE2" }}>
+                <div className="disp" style={{ fontSize: 20, fontWeight: 700, color: "#8A93A0", textTransform: "uppercase" }}>Sin registros</div>
+                <div style={{ fontSize: 14, color: "#8A93A0", marginTop: 6 }}>Crea un nuevo registro para empezar.</div>
+              </div>
+            ) : visibles.map(r => {
+              const est = EST[r.estado] || EST.programada;
+              return (
+                <article key={r.id} className="card" style={{ marginBottom: 12, overflow: "hidden" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 14px", background: "#F7F9FA", borderBottom: "1px solid #E4E8EC", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "#5A6673" }}>{fmtFecha(r.fecha, r.hora)} · Sem {calcSemana(r.fecha)}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".05em", color: est.color, background: est.bg, padding: "3px 10px", borderRadius: 999 }}>{est.label}</span>
+                  </div>
+                  <div style={{ padding: "12px 14px" }}>
+                    <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ color: r.tipo === "Envío" ? "#1F6FEB" : "#B7791F" }}>{r.tipo}</span>
+                      <span style={{ color: "#FFB020" }}>{r.tipo === "Envío" ? "→" : "←"}</span>
+                      <span>{r.suplidor}</span>
+                    </div>
+                    <div style={{ fontSize: 14, color: "#5A6673", marginTop: 4 }}>
+                      {r.chofer}{r.marchamo && <React.Fragment> · Marchamo <span className="mono" style={{ fontWeight: 600, color: "#17222E" }}>{r.marchamo}</span></React.Fragment>}
+                    </div>
+                    {r.observaciones && <div style={{ fontSize: 13, color: "#8A93A0", marginTop: 6, fontStyle: "italic" }}>{r.observaciones}</div>}
+                    {r.estado === "enruta" && r.inicio_ts && <div style={{ fontSize: 13, color: "#B7791F", marginTop: 6, fontWeight: 600 }}>▶ Iniciado a las {fmtHoraTs(r.inicio_ts)}</div>}
+                    {r.estado === "completada" && r.duracion_ms && (
+                      <div style={{ fontSize: 13, color: "#1F7A4D", marginTop: 6, fontWeight: 600 }}>
+                        ⏱ {r.inicio_ts ? `${fmtHoraTs(r.inicio_ts)} → ${fmtHoraTs(r.fin_ts)} · ` : ""}Duración: {fmtDur(r.duracion_ms)}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }} className="no-print">
+                      {r.estado === "programada" && (
+                        <React.Fragment>
+                          <button onClick={() => iniciarViaje(r.id)} style={{ padding: "8px 14px", background: "#17222E", color: "#FFB020", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700 }}>▶ Iniciar viaje</button>
+                          <button onClick={() => cambiarEstado(r.id, "completada")} style={{ padding: "8px 14px", background: "#fff", color: "#5A6673", border: "1.5px solid #D5DBE2", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Completar sin cronómetro</button>
+                          <button onClick={() => cambiarEstado(r.id, "cancelada")} style={{ padding: "8px 14px", background: "#fff", color: "#B42318", border: "1.5px solid #F0C7C2", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Cancelar</button>
+                        </React.Fragment>
+                      )}
+                      {r.estado === "enruta" && (
+                        <React.Fragment>
+                          <button onClick={() => terminarViaje(r)} style={{ padding: "8px 14px", background: "#1F7A4D", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700 }}>✔ Terminar viaje</button>
+                          <button onClick={() => cambiarEstado(r.id, "cancelada")} style={{ padding: "8px 14px", background: "#fff", color: "#B42318", border: "1.5px solid #F0C7C2", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Cancelar</button>
+                        </React.Fragment>
+                      )}
+                      {(r.estado === "completada" || r.estado === "cancelada") && (
+                        <React.Fragment>
+                          <button onClick={() => cambiarEstado(r.id, "programada")} style={{ padding: "8px 14px", background: "#fff", color: "#5A6673", border: "1.5px solid #D5DBE2", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Reabrir</button>
+                          <button onClick={() => eliminar(r.id)} style={{ padding: "8px 14px", background: "#fff", color: "#B42318", border: "1.5px solid #F0C7C2", borderRadius: 8, fontSize: 14, fontWeight: 600 }}>Eliminar</button>
+                        </React.Fragment>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </React.Fragment>
+        ) : vista === "marchamos" ? (
+          <section className="card" style={{ padding: 18 }}>
+            <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Consecutivo de marchamos</div>
+            <div style={{ fontSize: 14, color: "#5A6673", marginBottom: 14 }}>
+              Siguiente disponible: <span className="mono" style={{ fontWeight: 600 }}>{siguienteMarchamo || "Sin disponibles"}</span>
+              {" · "}{marchamos.filter(m => !usados.has(m)).length} de {marchamos.length} libres
+            </div>
+            <div style={{ background: "#F7F9FA", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              <label>Agregar marchamos</label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+                <input className="mono" placeholder="3981861 · 3981861-3981880 · CR001151821, CR001151822"
+                  value={nuevoMarchamo}
+                  onChange={e => { setNuevoMarchamo(e.target.value); setMsgMarchamo(""); }}
+                  onKeyDown={e => e.key === "Enter" && agregarMarchamos()} />
+                <button onClick={agregarMarchamos} style={{ padding: "0 18px", background: "#17222E", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 15 }}>Agregar</button>
+              </div>
+              <div style={{ fontSize: 12, color: "#8A93A0", marginTop: 6 }}>Uno solo, varios separados por coma, o un rango con guion.</div>
+              {msgMarchamo && <div style={{ fontSize: 13, color: msgMarchamo.startsWith("Se agregaron") ? "#1F7A4D" : "#B42318", marginTop: 6, fontWeight: 600 }}>{msgMarchamo}</div>}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8 }}>
+              {marchamos.map(m => {
+                const usado = usados.has(m);
+                return (
+                  <div key={m} className="mono" style={{ padding: "8px 10px", borderRadius: 8, fontSize: 13, fontWeight: 600, textAlign: "center",
+                    background: usado ? "#EDF0F3" : "#E2F3EA", color: usado ? "#9AA6B2" : "#1F7A4D",
+                    textDecoration: usado ? "line-through" : "none", border: "1px solid " + (usado ? "#E4E8EC" : "#C4E5D2"), position: "relative" }}>
+                    {m}
+                    {!usado && <button onClick={() => quitarMarchamo(m)} title="Quitar"
+                      style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 999, border: "none", background: "#B42318", color: "#fff", fontSize: 11, lineHeight: "18px", padding: 0 }}>×</button>}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : vista === "reporte" ? (
+          (() => {
+            const enPeriodo = registros.filter(r => repMes === "todos" || (r.fecha || "").startsWith(repMes));
+            const validos = enPeriodo.filter(r => r.estado !== "cancelada");
+            const envios = validos.filter(r => r.tipo === "Envío").length;
+            const recolectas = validos.filter(r => r.tipo === "Recolecta").length;
+            const canceladas = enPeriodo.filter(r => r.estado === "cancelada").length;
+            const pendientes = enPeriodo.filter(r => r.estado === "programada").length;
+            const tiempoTotal = validos.reduce((s, r) => s + (r.duracion_ms || 0), 0);
+
+            const porMes = {};
+            registros.filter(r => r.estado !== "cancelada").forEach(r => {
+              const k = r.fecha && r.fecha.slice(0, 7);
+              if (k) porMes[k] = (porMes[k] || 0) + 1;
+            });
+            const dataMes = Object.keys(porMes).sort().map(k => {
+              const [a, m] = k.split("-");
+              return { et: MESES[Number(m)-1] + " " + a.slice(2), n: porMes[k], key: k };
+            });
+            const maxMes = Math.max(1, ...dataMes.map(d => d.n));
+
+            const porSem = {}, tSem = {}, tChofer = {};
+            validos.forEach(r => {
+              if (!r.fecha) return;
+              const k = r.fecha.slice(0,4) + "·S" + String(calcSemana(r.fecha)).padStart(2,"0");
+              porSem[k] = (porSem[k] || 0) + 1;
+              if (r.duracion_ms) {
+                tSem[k] = (tSem[k] || 0) + r.duracion_ms;
+                if (r.chofer) tChofer[r.chofer] = (tChofer[r.chofer] || 0) + r.duracion_ms;
+              }
+            });
+            const dataSem = Object.keys(porSem).sort().map(k => ({ et: "S" + Number(k.split("·S")[1]), n: porSem[k], key: k }));
+            const maxSem = Math.max(1, ...dataSem.map(d => d.n));
+            const semTiempo = Object.keys(tSem).sort().map(k => ({ sem: "Semana " + Number(k.split("·S")[1]) + " · " + k.slice(0,4), ms: tSem[k] }));
+            const maxT = Math.max(1, ...semTiempo.map(x => x.ms));
+
+            const conteo = (campo) => {
+              const c = {};
+              validos.forEach(r => { if (r[campo]) c[r[campo]] = (c[r[campo]] || 0) + 1; });
+              return Object.entries(c).sort((a,b) => b[1] - a[1]);
+            };
+            const porChofer = conteo("chofer");
+            const maxC = Math.max(1, ...porChofer.map(([,n]) => n));
+            const porSupTipo = {};
+            validos.forEach(r => {
+              if (!r.suplidor) return;
+              if (!porSupTipo[r.suplidor]) porSupTipo[r.suplidor] = { rec: 0, env: 0 };
+              if (r.tipo === "Envío") porSupTipo[r.suplidor].env++; else porSupTipo[r.suplidor].rec++;
+            });
+            const supTipo = Object.entries(porSupTipo).sort((a,b) => (b[1].rec + b[1].env) - (a[1].rec + a[1].env));
+            const maxST = Math.max(1, ...supTipo.map(([,v]) => v.rec + v.env));
+            const tituloPeriodo = repMes === "todos" ? "Todo el historial" : MESES_LARGO[Number(repMes.split("-")[1]) - 1] + " " + repMes.split("-")[0];
+
+            const GraficaV = ({ data, color, resaltar }) => (
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 170, paddingTop: 10 }}>
+                {data.map(d => (
+                  <div key={d.key} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 0 }}>
+                    <span className="mono" style={{ fontSize: 11, fontWeight: 600, color: "#5A6673" }}>{d.n}</span>
+                    <div style={{ width: "100%", maxWidth: 42, height: `${(d.n / maxMesOrSem(data)) * 120}px`,
+                      background: resaltar && d.key === resaltar ? "#FFB020" : color, borderRadius: "6px 6px 0 0" }} />
+                    <span style={{ fontSize: 10, color: "#8A93A0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{d.et}</span>
+                  </div>
+                ))}
+              </div>
+            );
+            function maxMesOrSem(data) { return Math.max(1, ...data.map(d => d.n)); }
+            const BarraH = ({ nombre, val, pct, color }) => (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 3 }}>
+                  <span style={{ fontWeight: 500 }}>{nombre}</span>
+                  <span className="mono" style={{ fontWeight: 600 }}>{val}</span>
+                </div>
+                <div style={{ height: 8, background: "#EDF0F3", borderRadius: 999 }}>
+                  <div style={{ height: 8, width: `${pct}%`, background: color, borderRadius: 999 }} />
+                </div>
+              </div>
+            );
+
+            return (
+              <React.Fragment>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }} className="no-print">
+                  <select style={{ width: "auto", flex: 1, minWidth: 150 }} value={repMes} onChange={e => setRepMes(e.target.value)}>
+                    <option value="todos">Todo el historial</option>
+                    {mesesConDatos.map(m => { const [a, mm] = m.split("-"); return <option key={m} value={m}>{MESES_LARGO[Number(mm)-1]} {a}</option>; })}
+                  </select>
+                  <button onClick={() => window.print()} style={{ padding: "11px 16px", background: "#fff", border: "1.5px solid #D5DBE2", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Imprimir</button>
+                  <button onClick={exportarCSV} style={{ padding: "11px 16px", background: "#fff", border: "1.5px solid #D5DBE2", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Exportar CSV</button>
+                </div>
+                <div style={{ fontSize: 13, color: "#8A93A0", marginBottom: 12 }}>Reporte de transporte · {tituloPeriodo} · Placa {TRANSPORTISTA.placa}</div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 16 }}>
+                  {[
+                    { label: "Viajes", valor: validos.length, color: "#17222E" },
+                    { label: "Recolectas", valor: recolectas, color: "#B7791F" },
+                    { label: "Envíos", valor: envios, color: "#1F6FEB" },
+                    { label: "Programadas", valor: pendientes, color: "#1F7A4D" },
+                    { label: "Canceladas", valor: canceladas, color: "#B42318" },
+                    { label: "Marchamos libres", valor: marchamos.filter(m => !usados.has(m)).length, color: "#17222E" },
+                    { label: "Tiempo invertido", valor: fmtDur(tiempoTotal) || "0 min", color: "#B7791F" },
+                  ].map(k => (
+                    <div key={k.label} className="card" style={{ padding: "14px 12px 12px", textAlign: "center" }}>
+                      <div className="disp" style={{ fontSize: 27, fontWeight: 700, color: k.color, lineHeight: 1 }}>{k.valor}</div>
+                      <div style={{ fontSize: 11, color: "#8A93A0", textTransform: "uppercase", letterSpacing: ".05em", marginTop: 5 }}>{k.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <section className="card" style={{ padding: 18, marginBottom: 16 }}>
+                  <div className="disp" style={{ fontSize: 18, fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Viajes por mes</div>
+                  {dataMes.length === 0 ? <div style={{ color: "#8A93A0", fontSize: 14 }}>Aún no hay viajes.</div>
+                    : <GraficaV data={dataMes} color="#17222E" resaltar={repMes !== "todos" ? repMes : null} />}
+                </section>
+
+                <section className="card" style={{ padding: 18, marginBottom: 16 }}>
+                  <div className="disp" style={{ fontSize: 18, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>Viajes por semana</div>
+                  <div style={{ fontSize: 12, color: "#8A93A0", marginBottom: 4 }}>Semanas de lunes a domingo · {tituloPeriodo}</div>
+                  {dataSem.length === 0 ? <div style={{ color: "#8A93A0", fontSize: 14 }}>Sin viajes en este periodo.</div>
+                    : <GraficaV data={dataSem} color="#FFB020" />}
+                </section>
+
+                <section className="card" style={{ padding: 18, marginBottom: 16 }}>
+                  <div className="disp" style={{ fontSize: 18, fontWeight: 700, textTransform: "uppercase", marginBottom: 2 }}>Tiempo invertido por semana</div>
+                  <div style={{ fontSize: 12, color: "#8A93A0", marginBottom: 12 }}>Suma de duraciones cronometradas (Iniciar → Terminar) · {tituloPeriodo}</div>
+                  {semTiempo.length === 0
+                    ? <div style={{ color: "#8A93A0", fontSize: 14 }}>Aún no hay viajes cronometrados. Usa "▶ Iniciar" y "✔ Terminar" para registrar tiempos.</div>
+                    : semTiempo.map(x => <BarraH key={x.sem} nombre={x.sem} val={fmtDur(x.ms)} pct={(x.ms / maxT) * 100} color="#B7791F" />)}
+                </section>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+                  <section className="card" style={{ padding: 18 }}>
+                    <div className="disp" style={{ fontSize: 18, fontWeight: 700, textTransform: "uppercase", marginBottom: 12 }}>Por chofer</div>
+                    {porChofer.length === 0 ? <div style={{ color: "#8A93A0", fontSize: 14 }}>Sin datos en este periodo.</div>
+                      : porChofer.map(([n, v]) => (
+                        <BarraH key={n} nombre={n} val={v + (tChofer[n] ? " · " + fmtDur(tChofer[n]) : "")} pct={(v / maxC) * 100} color="#FFB020" />
+                      ))}
+                  </section>
+                  <section className="card" style={{ padding: 18 }}>
+                    <div className="disp" style={{ fontSize: 18, fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>Por suplidor</div>
+                    <div style={{ display: "flex", gap: 14, fontSize: 12, color: "#5A6673", marginBottom: 12 }}>
+                      <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 3, background: "#B7791F", marginRight: 5 }} />Recolectas</span>
+                      <span><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 3, background: "#1F6FEB", marginRight: 5 }} />Envíos</span>
+                    </div>
+                    {supTipo.length === 0 ? <div style={{ color: "#8A93A0", fontSize: 14 }}>Sin datos en este periodo.</div>
+                      : supTipo.map(([nombre, v]) => (
+                        <div key={nombre} style={{ marginBottom: 12 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 3 }}>
+                            <span style={{ fontWeight: 500 }}>{nombre}</span>
+                            <span className="mono" style={{ fontSize: 13, color: "#5A6673" }}>
+                              <span style={{ color: "#B7791F", fontWeight: 600 }}>{v.rec}</span>{" / "}
+                              <span style={{ color: "#1F6FEB", fontWeight: 600 }}>{v.env}</span>
+                            </span>
+                          </div>
+                          <div style={{ display: "flex", height: 8, background: "#EDF0F3", borderRadius: 999, overflow: "hidden" }}>
+                            <div style={{ height: 8, width: `${(v.rec / maxST) * 100}%`, background: "#B7791F" }} />
+                            <div style={{ height: 8, width: `${(v.env / maxST) * 100}%`, background: "#1F6FEB" }} />
+                          </div>
+                        </div>
+                      ))}
+                  </section>
+                </div>
+              </React.Fragment>
+            );
+          })()
+        ) : vista === "catalogos" ? (
+          <React.Fragment>
+            <section className="card" style={{ padding: 18, marginBottom: 16 }}>
+              <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 12 }}>Choferes</div>
+              {choferes.map(c => (
+                <div key={c.id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid #EDF0F3", fontSize: 15, gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 500 }}>{c.nombre}</span>
+                  <span className="mono" style={{ fontSize: 13, color: "#5A6673" }}>{c.cedula ? "Céd. " + c.cedula : ""}</span>
+                </div>
+              ))}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, marginTop: 12 }}>
+                <input placeholder="Nombre" value={nuevoChofer.nombre} onChange={e => setNuevoChofer({ ...nuevoChofer, nombre: e.target.value })} />
+                <input placeholder="Cédula" value={nuevoChofer.cedula} onChange={e => setNuevoChofer({ ...nuevoChofer, cedula: e.target.value })} />
+                <button onClick={agregarChofer} style={{ padding: "0 16px", background: "#17222E", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600 }}>Agregar</button>
+              </div>
+            </section>
+            <section className="card" style={{ padding: 18, marginBottom: 16 }}>
+              <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 12 }}>Suplidores</div>
+              {suplidores.map(s => (
+                <div key={s.id} style={{ padding: "9px 0", borderBottom: "1px solid #EDF0F3" }}>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>{s.nombre}</div>
+                  <div style={{ fontSize: 13, color: "#5A6673" }}>{s.direccion}{s.contacto ? ` · ${s.contacto}` : ""}</div>
+                </div>
+              ))}
+              <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+                <input placeholder="Nombre del suplidor" value={nuevoSuplidor.nombre} onChange={e => setNuevoSuplidor({ ...nuevoSuplidor, nombre: e.target.value })} />
+                <input placeholder="Dirección" value={nuevoSuplidor.direccion} onChange={e => setNuevoSuplidor({ ...nuevoSuplidor, direccion: e.target.value })} />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+                  <input placeholder="Contacto / teléfono" value={nuevoSuplidor.contacto} onChange={e => setNuevoSuplidor({ ...nuevoSuplidor, contacto: e.target.value })} />
+                  <button onClick={agregarSuplidor} style={{ padding: "0 16px", background: "#17222E", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600 }}>Agregar</button>
+                </div>
+              </div>
+            </section>
+            <section style={{ background: "#17222E", borderRadius: 12, padding: 18, color: "#fff" }}>
+              <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>Datos del transportista</div>
+              <div className="mono" style={{ fontSize: 14, lineHeight: 1.9, color: "#C9D2DB" }}>
+                Placa: <span style={{ color: "#FFB020" }}>{TRANSPORTISTA.placa}</span><br />
+                Código de transportista: {TRANSPORTISTA.codigo}<br />
+                Cédula jurídica: {TRANSPORTISTA.cedulaJuridica}<br />
+                Marchamo de la unidad: {TRANSPORTISTA.marchamoUnidad}
+              </div>
+            </section>
+          </React.Fragment>
+        ) : (
+          <section className="card" style={{ padding: 18 }}>
+            <div className="disp" style={{ fontSize: 20, fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Disponibilidad de choferes</div>
+            <div style={{ fontSize: 14, color: "#5A6673", marginBottom: 16 }}>
+              Habilita los días y el horario de cada chofer. Al crear un registro, solo se podrán reservar los choferes disponibles para esa fecha y hora.
+            </div>
+            {choferes.map(c => (
+              <div key={c.id} style={{ border: "1.5px solid #E4E8EC", borderRadius: 10, padding: 14, marginBottom: 12, opacity: c.activo ? 1 : 0.65 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 16 }}>{c.nombre}</div>
+                    <div style={{ fontSize: 12, color: "#8A93A0" }}>{descDisp(c)}</div>
+                  </div>
+                  <button onClick={() => actualizarDisp(c, { activo: !c.activo })}
+                    style={{ padding: "7px 14px", borderRadius: 999, fontSize: 13, fontWeight: 700, border: "none", textTransform: "uppercase", letterSpacing: ".04em",
+                      background: c.activo ? "#E2F3EA" : "#EDF0F3", color: c.activo ? "#1F7A4D" : "#8A93A0" }}>
+                    {c.activo ? "Habilitado" : "Deshabilitado"}
+                  </button>
+                </div>
+                {c.activo && (
+                  <React.Fragment>
+                    <label>Días habilitados</label>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                      {ORDEN_DIAS.map(dia => {
+                        const on = c.dias.includes(dia);
+                        return (
+                          <button key={dia} onClick={() => toggleDia(c, dia)}
+                            style={{ padding: "7px 0", width: 46, borderRadius: 8, fontSize: 13, fontWeight: 700,
+                              border: "1.5px solid " + (on ? "#17222E" : "#D5DBE2"), background: on ? "#17222E" : "#fff", color: on ? "#FFB020" : "#9AA6B2" }}>
+                            {DIAS_CORTO[dia]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                      <div><label>Desde</label><input type="time" value={c.desde} onChange={e => actualizarDisp(c, { desde: e.target.value })} /></div>
+                      <div><label>Hasta</label><input type="time" value={c.hasta} onChange={e => actualizarDisp(c, { hasta: e.target.value })} /></div>
+                    </div>
+                  </React.Fragment>
+                )}
+              </div>
+            ))}
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
