@@ -28,7 +28,29 @@
 </style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div style="text-align:center; padding:60px 20px; color:#8A93A0; font-family:sans-serif;">
+    Cargando aplicación…<br /><small>Si este mensaje no desaparece en 15 segundos, revisa tu conexión a internet.</small>
+  </div>
+</div>
+<div id="error-box" style="display:none; margin:16px; padding:14px; background:#FBE9E7; color:#B42318; border-radius:10px; font-family:monospace; font-size:13px; white-space:pre-wrap;"></div>
+<script>
+  // Muestra cualquier error en pantalla (útil en el teléfono, donde no hay consola)
+  function mostrarError(msg) {
+    var box = document.getElementById("error-box");
+    box.style.display = "block";
+    box.textContent += "⚠ " + msg + "\n\n";
+  }
+  window.onerror = function (msg, src, line) { mostrarError(msg + (line ? " (línea " + line + ")" : "")); };
+  window.addEventListener("unhandledrejection", function (e) { mostrarError("Promesa: " + (e.reason && e.reason.message ? e.reason.message : e.reason)); });
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      if (typeof React === "undefined") mostrarError("No se pudo cargar React desde internet (unpkg.com). Revisa la conexión o si tu red bloquea ese sitio.");
+      if (typeof supabase === "undefined") mostrarError("No se pudo cargar la librería de Supabase (cdn.jsdelivr.net). Revisa la conexión o si tu red bloquea ese sitio.");
+      if (typeof Babel === "undefined") mostrarError("No se pudo cargar Babel (unpkg.com). Revisa la conexión.");
+    }, 4000);
+  });
+</script>
 <script type="text/babel" data-presets="react">
 
 /* ============================================================
@@ -47,7 +69,12 @@ const TRANSPORTISTA = {
 
 /* ============================================================ */
 const { useState, useEffect, useCallback } = React;
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let sb = null;
+try {
+  sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch (e) {
+  mostrarError("No se pudo iniciar la conexión con Supabase: " + e.message);
+}
 
 const MESES = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
 const MESES_LARGO = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
